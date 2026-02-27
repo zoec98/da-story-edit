@@ -1,0 +1,24 @@
+[project]
+name = "da-story-edit"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Zoe Cordelier", email = "zoe.cordelier@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+da-story-edit = "da_story_edit:main"
+
+[build-system]
+requires = ["uv_build>=0.9.27,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.15.4",
+    "ty>=0.0.19",
+]
