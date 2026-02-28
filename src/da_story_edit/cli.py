@@ -21,11 +21,10 @@ from da_story_edit.config import (
 )
 from da_story_edit.gallery import (
     DeviationSummary,
-    extract_gallery_deviation_urls,
     GalleryTarget,
     parse_gallery_target,
 )
-from da_story_edit.http_client import API_PROFILE, BROWSER_PROFILE, ThrottledHttpClient
+from da_story_edit.http_client import API_PROFILE, ThrottledHttpClient
 from da_story_edit.navigation import NavTargets, apply_navigation
 from da_story_edit.options import build_parser
 
@@ -143,33 +142,6 @@ def _validate_access_token(access_token: str, http_client: ThrottledHttpClient) 
         raise ConfigError(f"Access token validation failed.{body}") from exc
 
 
-def _fetch_gallery_page_urls(
-    gallery_url: str, username: str, http_client: ThrottledHttpClient
-) -> list[str]:
-    try:
-        response = http_client.get(
-            gallery_url,
-            profile=BROWSER_PROFILE,
-            follow_redirects=True,
-        )
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise ConfigError(
-            "Failed to fetch gallery HTML fallback for URL parsing."
-        ) from exc
-
-    urls = extract_gallery_deviation_urls(response.text, username)
-    if not urls:
-        raise ConfigError(
-            "Gallery HTML fallback could not find deviation URLs for this user."
-        )
-    return urls
-
-
-def _normalize_url(url: str) -> str:
-    return url.rstrip("/")
-
-
 def _resolve_gallery_deviations(
     access_token: str,
     gallery_input: str,
@@ -184,39 +156,37 @@ def _resolve_gallery_deviations(
 
     deviations: list[DeviationSummary] = []
     resolved_folder_id: str | None = None
-    if target.folder_ref:
-        if "-" in target.folder_ref:
-            resolved_folder_id = target.folder_ref
-        else:
-            folders = client.list_folders(target.username)
-            if target.folder_slug:
-                folder_map = {slugify_name(folder.name): folder for folder in folders}
-                match = folder_map.get(slugify_name(target.folder_slug))
-                if match:
-                    resolved_folder_id = match.folder_id
+    if target.folder_slug:
+        folders = client.list_folders(target.username)
+        folder_map = {slugify_name(folder.name): folder for folder in folders}
+        match = folder_map.get(slugify_name(target.folder_slug))
+        if match:
+            candidate = client.list_gallery(
+                username=target.username,
+                folder_id=match.folder_id,
+                mode="newest",
+            )
+            if candidate:
+                deviations = candidate
+                resolved_folder_id = match.folder_id
 
-    if resolved_folder_id is not None:
+    if not deviations and target.folder_ref:
+        candidate = client.list_gallery(
+            username=target.username,
+            folder_id=target.folder_ref,
+            mode="newest",
+        )
+        if candidate:
+            deviations = candidate
+            resolved_folder_id = target.folder_ref
+
+    if not deviations:
         deviations = client.list_gallery(
             username=target.username,
-            folder_id=resolved_folder_id,
+            folder_id=None,
+            mode="newest",
         )
-    elif target.folder_ref and "://" in gallery_input:
-        ordered_urls = _fetch_gallery_page_urls(
-            gallery_input, target.username, http_client
-        )
-        all_gallery = client.list_gallery(username=target.username, folder_id=None)
-        by_url = {_normalize_url(item.url): item for item in all_gallery}
-        deviations = [
-            by_url[url]
-            for url in (_normalize_url(u) for u in ordered_urls)
-            if url in by_url
-        ]
-        if not deviations:
-            raise ConfigError(
-                "Could not map folder URLs from gallery HTML to API UUID entries."
-            )
-    else:
-        deviations = client.list_gallery(username=target.username, folder_id=None)
+        resolved_folder_id = None
 
     return target, deviations, resolved_folder_id
 
@@ -254,8 +224,10 @@ def _run_with_optional_refresh(
     http_client: ThrottledHttpClient,
 ) -> tuple[T, bool]:
     cfg = load_required_config(["DA_ACCESS_TOKEN"], env_path)
+    access_token = cfg["DA_ACCESS_TOKEN"]
+    refreshed = False
     try:
-        return operation(cfg["DA_ACCESS_TOKEN"]), False
+        _validate_access_token(access_token, http_client)
     except AuthTokenExpiredError:
         raw = load_config(env_path)
         has_refresh_setup = all(
@@ -278,7 +250,46 @@ def _run_with_optional_refresh(
             env_path,
             http_client,
         )
+        refreshed = True
         try:
+            _validate_access_token(access_token, http_client)
+        except AuthTokenExpiredError as exc:
+            raise ConfigError(
+                "Automatic token refresh was attempted once but the refreshed token is still rejected.\n"
+                "Run `uv run da-story-edit auth refresh` manually and retry the command."
+            ) from exc
+
+    try:
+        return operation(access_token), refreshed
+    except AuthTokenExpiredError:
+        if refreshed:
+            raise ConfigError(
+                "API rejected the refreshed access token during operation.\n"
+                "Run `uv run da-story-edit auth refresh` manually and retry the command."
+            ) from None
+
+        raw = load_config(env_path)
+        has_refresh_setup = all(
+            (raw.get(name) or "").strip()
+            for name in ["DA_CLIENT_ID", "DA_CLIENT_SECRET", "DA_REFRESH_TOKEN"]
+        )
+        if not has_refresh_setup:
+            raise ConfigError(
+                "Access token is invalid or expired and automatic refresh is not configured.\n"
+                "Set DA_CLIENT_ID, DA_CLIENT_SECRET, and DA_REFRESH_TOKEN in .env,\n"
+                "then run `uv run da-story-edit auth refresh`."
+            ) from None
+        refresh_cfg = load_required_config(
+            ["DA_CLIENT_ID", "DA_CLIENT_SECRET", "DA_REFRESH_TOKEN"], env_path
+        )
+        access_token, _, _ = _refresh_tokens(
+            refresh_cfg,
+            refresh_cfg["DA_REFRESH_TOKEN"],
+            env_path,
+            http_client,
+        )
+        try:
+            _validate_access_token(access_token, http_client)
             return operation(access_token), True
         except AuthTokenExpiredError as exc:
             raise ConfigError(

@@ -61,7 +61,7 @@ def parse_gallery_target(raw: str) -> GalleryTarget:
     username = parts[0]
     folder_ref: str | None = None
     folder_slug: str | None = None
-    if len(parts) >= 3 and parts[2].isdigit():
+    if len(parts) >= 3:
         folder_ref = parts[2]
     if len(parts) >= 4:
         folder_slug = parts[3].strip().lower()

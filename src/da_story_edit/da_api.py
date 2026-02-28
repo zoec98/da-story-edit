@@ -91,7 +91,11 @@ class DeviantArtApiClient:
         return payload
 
     def list_gallery(
-        self, username: str, folder_id: str | None = None
+        self,
+        username: str,
+        folder_id: str | None = None,
+        *,
+        mode: str = "newest",
     ) -> list[DeviationSummary]:
         path = "/gallery/all" if folder_id is None else f"/gallery/{folder_id}"
         offset = 0
@@ -105,6 +109,7 @@ class DeviantArtApiClient:
                     "username": username,
                     "offset": offset,
                     "limit": limit,
+                    "mode": mode,
                     "mature_content": "true",
                 },
             )
@@ -124,28 +129,46 @@ class DeviantArtApiClient:
         return all_items
 
     def list_folders(self, username: str) -> list[GalleryFolder]:
-        payload = self._get(
-            "/gallery/folders",
-            {
-                "username": username,
-            },
-        )
-        raw_results = payload.get("results")
-        if not isinstance(raw_results, list):
-            raise ConfigError(
-                "Gallery folders API response is missing a 'results' list."
-            )
-
+        offset = 0
+        limit = 50
         folders: list[GalleryFolder] = []
-        for entry in raw_results:
-            if not isinstance(entry, dict):
-                continue
-            entry_dict = cast(dict[str, object], entry)
-            folder_id = str(entry_dict.get("folderid") or "").strip()
-            name = str(entry_dict.get("name") or "").strip()
-            if not folder_id or not name:
-                continue
-            folders.append(GalleryFolder(folder_id=folder_id, name=name))
+
+        while True:
+            payload = self._get(
+                "/gallery/folders",
+                {
+                    "username": username,
+                    "offset": offset,
+                    "limit": limit,
+                },
+            )
+            raw_results = payload.get("results")
+            if not isinstance(raw_results, list):
+                raise ConfigError(
+                    "Gallery folders API response is missing a 'results' list."
+                )
+
+            for entry in raw_results:
+                if not isinstance(entry, dict):
+                    continue
+                entry_dict = cast(dict[str, object], entry)
+                folder_id = str(entry_dict.get("folderid") or "").strip()
+                name = str(entry_dict.get("name") or "").strip()
+                if not folder_id or not name:
+                    continue
+                folders.append(GalleryFolder(folder_id=folder_id, name=name))
+
+            has_more = bool(payload.get("has_more"))
+            next_offset = payload.get("next_offset")
+            if not has_more:
+                break
+            if not isinstance(next_offset, int):
+                if not raw_results:
+                    break
+                offset += len(raw_results)
+            else:
+                offset = next_offset
+
         return folders
 
     def get_deviation(self, deviation_id: str) -> dict[str, object]:

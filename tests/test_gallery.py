@@ -18,6 +18,15 @@ def test_parse_gallery_target_from_test_url() -> None:
     assert target.folder_slug == "testgallery"
 
 
+def test_parse_gallery_target_from_uuid_folder_url() -> None:
+    target = parse_gallery_target(
+        "https://www.deviantart.com/zoec98/gallery/3A5D1232-028A-EE65-6834-980612D53085/featured"
+    )
+    assert target.username == "zoec98"
+    assert target.folder_ref == "3A5D1232-028A-EE65-6834-980612D53085"
+    assert target.folder_slug == "featured"
+
+
 def test_parse_gallery_target_from_username() -> None:
     target = parse_gallery_target("zoec98")
     assert target.username == "zoec98"
