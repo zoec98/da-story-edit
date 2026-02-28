@@ -10,6 +10,51 @@ The update flow must be idempotent:
 2. Recompute sequence from current gallery contents.
 3. Insert updated navigation blocks.
 
+## Status Update (2026-02-28)
+
+Yes, we are still following the plan, with one practical adjustment:
+
+- We are API-first, but use an HTML fallback for URL-folder ordering when DeviantArt folder metadata does not expose the web folder ID/slug mapping.
+
+Current position in the plan:
+
+- Delivery Phase 1 (`Foundation`): completed.
+- Delivery Phase 2 (`Robust parsing`): completed for gallery listing and ordering behavior.
+- Delivery Phase 5 (`Hardening`): partially completed for auth/token behavior and error messaging.
+- Delivery Phases 3 and 4 (navigation engine + edit client): not started yet.
+
+What is implemented now:
+
+- OAuth helper CLI:
+  - `auth login-url`
+  - `auth exchange`
+  - `auth refresh`
+  - `auth token-info`
+- `.env` bootstrap/registry validation with non-destructive updates.
+- Token handling:
+  - normal commands use current access token
+  - automatic one-time background refresh on token-expiry/invalid-token responses
+  - clear fallback instruction to run `uv run da-story-edit auth refresh` on failure
+- Gallery listing CLI:
+  - `gallery list <gallery_url|username>`
+  - `--ascending` keeps DA gallery order
+  - `--descending` reverses order (default)
+  - `--literature-only`
+- UUID-safe behavior:
+  - API operations use UUID `deviationid`
+  - URL numeric suffixes are never used for API calls
+- Folder URL handling:
+  - try API folder resolution first
+  - fallback to gallery HTML ordering + map URLs to API `/gallery/all` UUID entries
+
+What is not implemented yet:
+
+- `GET /deviation/content` fetch pipeline.
+- Navigation block render/replace engine.
+- Dry-run navigation diff output.
+- `POST /deviation/literature/update/{deviationid}` write path.
+- Update payload preservation safeguards for write operations.
+
 ## Documentation-Validated Constraints
 
 This plan is aligned to DeviantArt Developer API `v1/20240701`.
@@ -262,6 +307,14 @@ Test phases:
 5. Hardening
    - logging, error reporting, edge cases, docs refresh
 
+Progress notes:
+
+- Phase 1: done
+- Phase 2: done (with URL-folder HTML fallback)
+- Phase 3: pending
+- Phase 4: pending
+- Phase 5: in progress
+
 ## Risks and Mitigations
 
 - DeviantArt markup changes:
@@ -277,8 +330,14 @@ Test phases:
 
 ## Immediate Next Actions
 
-1. Implement API client (`httpx`) with User-Agent, OAuth token support, and endpoint wrappers.
-2. Implement gallery URL resolver and API-based literature listing with UUID IDs.
-3. Implement dry-run navigation generation from `/deviation/content`.
-4. Implement marker-based idempotent replace engine + tests.
-5. Implement literature update submission with preserved required fields + mocked contract tests.
+1. Implement `deviation content` read module (`GET /deviation/content`) returning editable literature HTML/body per UUID.
+2. Implement navigation block generator + idempotent strip/replace engine with marker tests.
+3. Add `story nav dry-run` command that:
+   - lists ordered literature UUIDs from `gallery list` pipeline
+   - computes first/prev/next/last targets
+   - prints planned top/bottom insertions without writing.
+4. Implement literature update client for `POST /deviation/literature/update/{deviationid}` with required field preservation.
+5. Add end-to-end tests for:
+   - rerun idempotency (replace not duplicate)
+   - partial failure reporting
+   - token-expiry auto-refresh retry path during read/write operations.
