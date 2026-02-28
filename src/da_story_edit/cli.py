@@ -25,13 +25,17 @@ from da_story_edit.gallery import (
     GalleryTarget,
     parse_gallery_target,
 )
+from da_story_edit.http_client import API_PROFILE, BROWSER_PROFILE, ThrottledHttpClient
 from da_story_edit.navigation import NavTargets, apply_navigation
 from da_story_edit.options import build_parser
 
 AUTHORIZE_ENDPOINT = "https://www.deviantart.com/oauth2/authorize"
 TOKEN_ENDPOINT = "https://www.deviantart.com/oauth2/token"
 PLACEBO_ENDPOINT = "https://www.deviantart.com/api/v1/oauth2/placebo"
-USER_AGENT = "da-story-edit/0.1.0 (+https://github.com/zoec98/da-story-edit)"
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) "
+    "Gecko/20100101 Firefox/148.0"
+)
 T = TypeVar("T")
 
 
@@ -50,14 +54,14 @@ def _build_authorize_url(
     return f"{AUTHORIZE_ENDPOINT}?{query}"
 
 
-def _token_request(form_data: dict[str, str]) -> dict[str, object]:
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
-    }
+def _token_request(
+    form_data: dict[str, str], http_client: ThrottledHttpClient
+) -> dict[str, object]:
     try:
-        response = httpx.post(
-            TOKEN_ENDPOINT, data=form_data, headers=headers, timeout=30.0
+        response = http_client.post(
+            TOKEN_ENDPOINT,
+            data={k: v for k, v in form_data.items()},
+            profile=API_PROFILE,
         )
         response.raise_for_status()
     except httpx.HTTPError as exc:
@@ -92,7 +96,10 @@ def _scope_from_payload(payload: dict[str, object]) -> str:
 
 
 def _refresh_tokens(
-    cfg: dict[str, str], refresh_token: str, env_path: Path
+    cfg: dict[str, str],
+    refresh_token: str,
+    env_path: Path,
+    http_client: ThrottledHttpClient,
 ) -> tuple[str, str, str]:
     payload = _token_request(
         {
@@ -100,7 +107,8 @@ def _refresh_tokens(
             "client_id": cfg["DA_CLIENT_ID"],
             "client_secret": cfg["DA_CLIENT_SECRET"],
             "refresh_token": refresh_token,
-        }
+        },
+        http_client,
     )
     access_token, new_refresh_token = _ensure_token_fields(payload)
     scope = _scope_from_payload(payload)
@@ -114,17 +122,12 @@ def _refresh_tokens(
     return access_token, new_refresh_token, scope
 
 
-def _validate_access_token(access_token: str) -> None:
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
-    }
+def _validate_access_token(access_token: str, http_client: ThrottledHttpClient) -> None:
     try:
-        response = httpx.get(
+        response = http_client.get(
             PLACEBO_ENDPOINT,
             params={"access_token": access_token},
-            headers=headers,
-            timeout=30.0,
+            profile=API_PROFILE,
         )
         response.raise_for_status()
     except httpx.HTTPError as exc:
@@ -140,13 +143,15 @@ def _validate_access_token(access_token: str) -> None:
         raise ConfigError(f"Access token validation failed.{body}") from exc
 
 
-def _fetch_gallery_page_urls(gallery_url: str, username: str) -> list[str]:
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "text/html",
-    }
+def _fetch_gallery_page_urls(
+    gallery_url: str, username: str, http_client: ThrottledHttpClient
+) -> list[str]:
     try:
-        response = httpx.get(gallery_url, headers=headers, timeout=30.0)
+        response = http_client.get(
+            gallery_url,
+            profile=BROWSER_PROFILE,
+            follow_redirects=True,
+        )
         response.raise_for_status()
     except httpx.HTTPError as exc:
         raise ConfigError(
@@ -166,10 +171,16 @@ def _normalize_url(url: str) -> str:
 
 
 def _resolve_gallery_deviations(
-    access_token: str, gallery_input: str
+    access_token: str,
+    gallery_input: str,
+    http_client: ThrottledHttpClient,
 ) -> tuple[GalleryTarget, list[DeviationSummary], str | None]:
     target = parse_gallery_target(gallery_input)
-    client = DeviantArtApiClient(access_token=access_token, user_agent=USER_AGENT)
+    client = DeviantArtApiClient(
+        access_token=access_token,
+        user_agent=USER_AGENT,
+        http_client=http_client,
+    )
 
     deviations: list[DeviationSummary] = []
     resolved_folder_id: str | None = None
@@ -190,7 +201,9 @@ def _resolve_gallery_deviations(
             folder_id=resolved_folder_id,
         )
     elif target.folder_ref and "://" in gallery_input:
-        ordered_urls = _fetch_gallery_page_urls(gallery_input, target.username)
+        ordered_urls = _fetch_gallery_page_urls(
+            gallery_input, target.username, http_client
+        )
         all_gallery = client.list_gallery(username=target.username, folder_id=None)
         by_url = {_normalize_url(item.url): item for item in all_gallery}
         deviations = [
@@ -236,7 +249,9 @@ def _looks_like_invalid_token(response: httpx.Response) -> bool:
 
 
 def _run_with_optional_refresh(
-    env_path: Path, operation: Callable[[str], T]
+    env_path: Path,
+    operation: Callable[[str], T],
+    http_client: ThrottledHttpClient,
 ) -> tuple[T, bool]:
     cfg = load_required_config(["DA_ACCESS_TOKEN"], env_path)
     try:
@@ -258,7 +273,10 @@ def _run_with_optional_refresh(
             ["DA_CLIENT_ID", "DA_CLIENT_SECRET", "DA_REFRESH_TOKEN"], env_path
         )
         access_token, _, _ = _refresh_tokens(
-            refresh_cfg, refresh_cfg["DA_REFRESH_TOKEN"], env_path
+            refresh_cfg,
+            refresh_cfg["DA_REFRESH_TOKEN"],
+            env_path,
+            http_client,
         )
         try:
             return operation(access_token), True
@@ -273,6 +291,7 @@ def run(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     env_path = Path(".env")
+    http_client = ThrottledHttpClient(user_agent=USER_AGENT)
 
     if args.command is None:
         load_required_config(
@@ -302,7 +321,8 @@ def run(argv: list[str] | None = None) -> int:
                 "client_secret": cfg["DA_CLIENT_SECRET"],
                 "redirect_uri": cfg["DA_REDIRECT_URI"],
                 "code": args.code,
-            }
+            },
+            http_client,
         )
         access_token, refresh_token = _ensure_token_fields(payload)
         scope = _scope_from_payload(payload)
@@ -324,7 +344,7 @@ def run(argv: list[str] | None = None) -> int:
             required.append("DA_REFRESH_TOKEN")
         cfg = load_required_config(required, env_path)
         refresh_token = args.refresh_token or cfg["DA_REFRESH_TOKEN"]
-        _, _, scope = _refresh_tokens(cfg, refresh_token, env_path)
+        _, _, scope = _refresh_tokens(cfg, refresh_token, env_path, http_client)
         print("OAuth refresh succeeded. Updated token values in .env.")
         if scope:
             print(f"Scope: {scope}")
@@ -332,7 +352,9 @@ def run(argv: list[str] | None = None) -> int:
 
     if args.command == "auth" and args.auth_command == "token-info":
         _run_with_optional_refresh(
-            env_path, lambda access_token: _validate_access_token(access_token)
+            env_path,
+            lambda access_token: _validate_access_token(access_token, http_client),
+            http_client,
         )
         cfg = load_config(env_path)
 
@@ -361,8 +383,9 @@ def run(argv: list[str] | None = None) -> int:
         result, _ = _run_with_optional_refresh(
             env_path,
             lambda access_token: _resolve_gallery_deviations(
-                access_token, args.gallery
+                access_token, args.gallery, http_client
             ),
+            http_client,
         )
         target, deviations, resolved_folder_id = result
 
@@ -392,8 +415,9 @@ def run(argv: list[str] | None = None) -> int:
         result, refreshed = _run_with_optional_refresh(
             env_path,
             lambda access_token: _resolve_gallery_deviations(
-                access_token, args.gallery
+                access_token, args.gallery, http_client
             ),
+            http_client,
         )
         target, deviations, _ = result
         if args.order == "descending":
@@ -416,7 +440,11 @@ def run(argv: list[str] | None = None) -> int:
             access_token = load_required_config(["DA_ACCESS_TOKEN"], env_path)[
                 "DA_ACCESS_TOKEN"
             ]
-        client = DeviantArtApiClient(access_token=access_token, user_agent=USER_AGENT)
+        client = DeviantArtApiClient(
+            access_token=access_token,
+            user_agent=USER_AGENT,
+            http_client=http_client,
+        )
 
         changed_count = 0
         uploaded_count = 0

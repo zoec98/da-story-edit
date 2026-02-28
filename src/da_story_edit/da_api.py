@@ -10,6 +10,7 @@ import httpx
 
 from da_story_edit.config import AuthTokenExpiredError, ConfigError
 from da_story_edit.gallery import DeviationSummary, parse_gallery_results
+from da_story_edit.http_client import API_PROFILE, ThrottledHttpClient
 
 API_BASE = "https://www.deviantart.com/api/v1/oauth2"
 
@@ -27,19 +28,21 @@ def slugify_name(value: str) -> str:
 
 
 class DeviantArtApiClient:
-    def __init__(self, access_token: str, user_agent: str) -> None:
+    def __init__(
+        self,
+        access_token: str,
+        user_agent: str,
+        http_client: ThrottledHttpClient | None = None,
+    ) -> None:
         self.access_token = access_token
-        self.headers = {
-            "User-Agent": user_agent,
-            "Accept": "application/json",
-        }
+        self.http_client = http_client or ThrottledHttpClient(user_agent=user_agent)
 
     def _get(self, path: str, params: dict[str, object]) -> dict[str, object]:
         merged = {"access_token": self.access_token}
         merged.update(params)
         url = f"{API_BASE}{path}"
         try:
-            response = httpx.get(url, params=merged, headers=self.headers, timeout=30.0)
+            response = self.http_client.get(url, params=merged, profile=API_PROFILE)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             body = ""
@@ -66,7 +69,7 @@ class DeviantArtApiClient:
         merged.update(data)
         url = f"{API_BASE}{path}"
         try:
-            response = httpx.post(url, data=merged, headers=self.headers, timeout=30.0)
+            response = self.http_client.post(url, data=merged, profile=API_PROFILE)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             body = ""
