@@ -69,6 +69,19 @@ Notes:
 - `--descending` reverses that order.
 - `--literature-only` filters output to literature deviations.
 
+Sync command (download, local edit, optional upload):
+
+```bash
+uv run da-story-edit sync "https://www.deviantart.com/<user>/gallery/<folderid>/<slug>" -n
+uv run da-story-edit sync "https://www.deviantart.com/<user>/gallery/<folderid>/<slug>"
+```
+
+Notes:
+
+- `-n` / `--dry-run` writes local artifacts and diffs only, with no upload.
+- Without `-n`, changed literature deviations are uploaded via the literature update endpoint.
+- Use `--workdir <path>` to control where local artifacts are written; otherwise a timestamped `tmp/sync-*` directory is created.
+
 ## Planned CLI Usage
 
 The package exposes a console entry point named `da-story-edit`.

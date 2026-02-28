@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import secrets
 import sys
+from datetime import UTC, datetime
+from difflib import unified_diff
 from pathlib import Path
 from typing import Callable, TypeVar
 from urllib.parse import urlencode
@@ -20,8 +22,10 @@ from da_story_edit.config import (
 from da_story_edit.gallery import (
     DeviationSummary,
     extract_gallery_deviation_urls,
+    GalleryTarget,
     parse_gallery_target,
 )
+from da_story_edit.navigation import NavTargets, apply_navigation
 from da_story_edit.options import build_parser
 
 AUTHORIZE_ENDPOINT = "https://www.deviantart.com/oauth2/authorize"
@@ -159,6 +163,60 @@ def _fetch_gallery_page_urls(gallery_url: str, username: str) -> list[str]:
 
 def _normalize_url(url: str) -> str:
     return url.rstrip("/")
+
+
+def _resolve_gallery_deviations(
+    access_token: str, gallery_input: str
+) -> tuple[GalleryTarget, list[DeviationSummary], str | None]:
+    target = parse_gallery_target(gallery_input)
+    client = DeviantArtApiClient(access_token=access_token, user_agent=USER_AGENT)
+
+    deviations: list[DeviationSummary] = []
+    resolved_folder_id: str | None = None
+    if target.folder_ref:
+        if "-" in target.folder_ref:
+            resolved_folder_id = target.folder_ref
+        else:
+            folders = client.list_folders(target.username)
+            if target.folder_slug:
+                folder_map = {slugify_name(folder.name): folder for folder in folders}
+                match = folder_map.get(slugify_name(target.folder_slug))
+                if match:
+                    resolved_folder_id = match.folder_id
+
+    if resolved_folder_id is not None:
+        deviations = client.list_gallery(
+            username=target.username,
+            folder_id=resolved_folder_id,
+        )
+    elif target.folder_ref and "://" in gallery_input:
+        ordered_urls = _fetch_gallery_page_urls(gallery_input, target.username)
+        all_gallery = client.list_gallery(username=target.username, folder_id=None)
+        by_url = {_normalize_url(item.url): item for item in all_gallery}
+        deviations = [
+            by_url[url]
+            for url in (_normalize_url(u) for u in ordered_urls)
+            if url in by_url
+        ]
+        if not deviations:
+            raise ConfigError(
+                "Could not map folder URLs from gallery HTML to API UUID entries."
+            )
+    else:
+        deviations = client.list_gallery(username=target.username, folder_id=None)
+
+    return target, deviations, resolved_folder_id
+
+
+def _ensure_empty_workdir(path: Path) -> Path:
+    if path.exists():
+        if not path.is_dir():
+            raise ConfigError(f"Workdir path exists and is not a directory: {path}")
+        if any(path.iterdir()):
+            raise ConfigError(f"Workdir must be empty: {path}")
+    else:
+        path.mkdir(parents=True, exist_ok=False)
+    return path
 
 
 def _looks_like_invalid_token(response: httpx.Response) -> bool:
@@ -300,57 +358,13 @@ def run(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "gallery" and args.gallery_command == "list":
-        target = parse_gallery_target(args.gallery)
-
-        def _list_with_token(
-            access_token: str,
-        ) -> tuple[list[DeviationSummary], str | None]:
-            client = DeviantArtApiClient(
-                access_token=access_token, user_agent=USER_AGENT
-            )
-            deviations: list[DeviationSummary] = []
-            resolved_folder_id: str | None = None
-            if target.folder_ref:
-                if "-" in target.folder_ref:
-                    resolved_folder_id = target.folder_ref
-                else:
-                    folders = client.list_folders(target.username)
-                    if target.folder_slug:
-                        folder_map = {
-                            slugify_name(folder.name): folder for folder in folders
-                        }
-                        match = folder_map.get(slugify_name(target.folder_slug))
-                        if match:
-                            resolved_folder_id = match.folder_id
-
-            if resolved_folder_id is not None:
-                deviations = client.list_gallery(
-                    username=target.username,
-                    folder_id=resolved_folder_id,
-                )
-            elif target.folder_ref and "://" in args.gallery:
-                ordered_urls = _fetch_gallery_page_urls(args.gallery, target.username)
-                all_gallery = client.list_gallery(
-                    username=target.username, folder_id=None
-                )
-                by_url = {_normalize_url(item.url): item for item in all_gallery}
-                deviations = [
-                    by_url[url]
-                    for url in (_normalize_url(u) for u in ordered_urls)
-                    if url in by_url
-                ]
-                if not deviations:
-                    raise ConfigError(
-                        "Could not map folder URLs from gallery HTML to API UUID entries."
-                    )
-            else:
-                deviations = client.list_gallery(
-                    username=target.username, folder_id=None
-                )
-            return deviations, resolved_folder_id
-
-        result, _ = _run_with_optional_refresh(env_path, _list_with_token)
-        deviations, resolved_folder_id = result
+        result, _ = _run_with_optional_refresh(
+            env_path,
+            lambda access_token: _resolve_gallery_deviations(
+                access_token, args.gallery
+            ),
+        )
+        target, deviations, resolved_folder_id = result
 
         if args.order == "descending":
             deviations = list(reversed(deviations))
@@ -372,6 +386,108 @@ def run(argv: list[str] | None = None) -> int:
 
         literature_count = sum(1 for item in deviations if item.is_literature)
         print(f"Literature entries: {literature_count}")
+        return 0
+
+    if args.command == "sync":
+        result, refreshed = _run_with_optional_refresh(
+            env_path,
+            lambda access_token: _resolve_gallery_deviations(
+                access_token, args.gallery
+            ),
+        )
+        target, deviations, _ = result
+        if args.order == "descending":
+            deviations = list(reversed(deviations))
+        literature = [item for item in deviations if item.is_literature]
+        if not literature:
+            raise ConfigError(
+                "No literature deviations found in selected gallery scope."
+            )
+
+        if args.workdir:
+            workdir = _ensure_empty_workdir(Path(args.workdir))
+        else:
+            ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+            workdir = _ensure_empty_workdir(Path("tmp") / f"sync-{ts}")
+
+        cfg = load_config(env_path)
+        access_token = cfg.get("DA_ACCESS_TOKEN") or ""
+        if refreshed:
+            access_token = load_required_config(["DA_ACCESS_TOKEN"], env_path)[
+                "DA_ACCESS_TOKEN"
+            ]
+        client = DeviantArtApiClient(access_token=access_token, user_agent=USER_AGENT)
+
+        changed_count = 0
+        uploaded_count = 0
+        print(f"Sync workdir: {workdir}")
+        print(f"Gallery: {target.username}")
+        print(f"Order: {args.order}")
+        print(f"Literature items: {len(literature)}")
+        if args.dry_run:
+            print("Mode: dry-run")
+        else:
+            print("Mode: live upload")
+
+        for idx, item in enumerate(literature, start=1):
+            first = literature[0].url
+            last = literature[-1].url
+            prev_url = literature[idx - 2].url if idx > 1 else None
+            next_url = literature[idx].url if idx < len(literature) else None
+            targets = NavTargets(first=first, prev=prev_url, next=next_url, last=last)
+
+            metadata = client.get_deviation(item.deviation_id)
+            html = client.get_deviation_content_html(item.deviation_id)
+            updated = apply_navigation(html, targets)
+            changed = updated != (html if html.endswith("\n") else f"{html}\n")
+
+            safe_id = item.deviation_id.replace("/", "_")
+            base = f"{idx:03d}_{safe_id}"
+            (workdir / f"{base}_meta.json").write_text(
+                json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8"
+            )
+            (workdir / f"{base}_original.html").write_text(html, encoding="utf-8")
+            (workdir / f"{base}_updated.html").write_text(updated, encoding="utf-8")
+
+            print(
+                f"{idx:03d} {item.title} [{item.deviation_id}] changed={'yes' if changed else 'no'}"
+            )
+            if changed:
+                changed_count += 1
+                diff = "\n".join(
+                    unified_diff(
+                        (html or "").splitlines(),
+                        updated.splitlines(),
+                        fromfile=f"{base}_original.html",
+                        tofile=f"{base}_updated.html",
+                        lineterm="",
+                    )
+                )
+                (workdir / f"{base}.diff").write_text(
+                    diff + ("\n" if diff else ""), encoding="utf-8"
+                )
+                if args.dry_run:
+                    diff_lines = diff.splitlines()
+                    preview = "\n".join(diff_lines[:60])
+                    if preview:
+                        print(preview)
+
+                if not args.dry_run:
+                    title = str(metadata.get("title") or item.title)
+                    is_mature = bool(metadata.get("is_mature"))
+                    client.update_literature(
+                        deviation_id=item.deviation_id,
+                        title=title,
+                        body_html=updated,
+                        is_mature=is_mature,
+                    )
+                    uploaded_count += 1
+
+        print(f"Changed items: {changed_count}")
+        if args.dry_run:
+            print("No upload performed (dry-run).")
+        else:
+            print(f"Uploaded items: {uploaded_count}")
         return 0
 
     parser.print_help()

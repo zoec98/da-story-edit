@@ -61,6 +61,32 @@ class DeviantArtApiClient:
             raise ConfigError(f"API response for {path} had unexpected shape.")
         return payload
 
+    def _post(self, path: str, data: dict[str, object]) -> dict[str, object]:
+        merged = {"access_token": self.access_token}
+        merged.update(data)
+        url = f"{API_BASE}{path}"
+        try:
+            response = httpx.post(url, data=merged, headers=self.headers, timeout=30.0)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            body = ""
+            if isinstance(exc, httpx.HTTPStatusError):
+                if _looks_like_invalid_token(exc.response):
+                    raise AuthTokenExpiredError(
+                        "Access token is invalid or expired."
+                    ) from exc
+                snippet = exc.response.text[:300].replace("\n", " ")
+                body = f" Response body: {snippet}"
+            raise ConfigError(f"API request failed for {path}.{body}") from exc
+
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as exc:
+            raise ConfigError(f"API response for {path} was not valid JSON.") from exc
+        if not isinstance(payload, dict):
+            raise ConfigError(f"API response for {path} had unexpected shape.")
+        return payload
+
     def list_gallery(
         self, username: str, folder_id: str | None = None
     ) -> list[DeviationSummary]:
@@ -118,6 +144,30 @@ class DeviantArtApiClient:
                 continue
             folders.append(GalleryFolder(folder_id=folder_id, name=name))
         return folders
+
+    def get_deviation(self, deviation_id: str) -> dict[str, object]:
+        return self._get(f"/deviation/{deviation_id}", {"mature_content": "true"})
+
+    def get_deviation_content_html(self, deviation_id: str) -> str:
+        payload = self._get(
+            "/deviation/content",
+            {
+                "deviationid": deviation_id,
+            },
+        )
+        return str(payload.get("html") or "")
+
+    def update_literature(
+        self, deviation_id: str, title: str, body_html: str, is_mature: bool
+    ) -> dict[str, object]:
+        return self._post(
+            f"/deviation/literature/update/{deviation_id}",
+            {
+                "title": title,
+                "text": body_html,
+                "is_mature": "true" if is_mature else "false",
+            },
+        )
 
 
 def _looks_like_invalid_token(response: httpx.Response) -> bool:

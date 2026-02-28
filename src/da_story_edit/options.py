@@ -83,4 +83,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gallery_list.set_defaults(order="descending")
 
+    sync = subparsers.add_parser(
+        "sync",
+        help="Download literature deviations, edit navigation locally, and optionally upload.",
+    )
+    sync.add_argument(
+        "gallery",
+        help="Gallery URL (preferred) or DeviantArt username.",
+    )
+    sync.add_argument(
+        "-n",
+        "--dry-run",
+        action="store_true",
+        help="Do not upload; show planned changes only.",
+    )
+    sync.add_argument(
+        "--workdir",
+        default=None,
+        help="Working directory for downloaded/edited files (must be empty if existing).",
+    )
+    sync_order = sync.add_mutually_exclusive_group()
+    sync_order.add_argument(
+        "--ascending",
+        action="store_const",
+        const="ascending",
+        dest="order",
+        help="Keep gallery order as shown on DeviantArt (manual order).",
+    )
+    sync_order.add_argument(
+        "--descending",
+        action="store_const",
+        const="descending",
+        dest="order",
+        help="Reverse gallery order (useful when chapters were posted over time).",
+    )
+    sync.set_defaults(order="descending")
+
     return parser

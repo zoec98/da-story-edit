@@ -20,8 +20,9 @@ Current position in the plan:
 
 - Delivery Phase 1 (`Foundation`): completed.
 - Delivery Phase 2 (`Robust parsing`): completed for gallery listing and ordering behavior.
+- Delivery Phase 3 (`Navigation engine`): completed (marker-based local rewrite + tests).
+- Delivery Phase 4 (`Edit client`): implemented baseline (`deviation` read, content fetch, literature update call).
 - Delivery Phase 5 (`Hardening`): partially completed for auth/token behavior and error messaging.
-- Delivery Phases 3 and 4 (navigation engine + edit client): not started yet.
 
 What is implemented now:
 
@@ -46,14 +47,20 @@ What is implemented now:
 - Folder URL handling:
   - try API folder resolution first
   - fallback to gallery HTML ordering + map URLs to API `/gallery/all` UUID entries
+- Sync pipeline:
+  - `sync <gallery> -n` creates an empty workdir, downloads deviations, applies local nav edits, and writes diffs
+  - `sync <gallery>` uploads changed deviations
+  - per-item artifacts are written (`*_meta.json`, `*_original.html`, `*_updated.html`, `*.diff`)
+- Deviation/edit API integration:
+  - `GET /deviation/{uuid}` for metadata
+  - `GET /deviation/content` for body HTML
+  - `POST /deviation/literature/update/{uuid}` for writeback
 
 What is not implemented yet:
 
-- `GET /deviation/content` fetch pipeline.
-- Navigation block render/replace engine.
-- Dry-run navigation diff output.
-- `POST /deviation/literature/update/{deviationid}` write path.
-- Update payload preservation safeguards for write operations.
+- Full write payload preservation hardening (currently baseline fields only: `title`, `is_mature`, `text`).
+- Richer failure classification/reporting for batch sync (skip vs retry vs fatal summary codes).
+- Contract/integration tests that mock upload payload shape and retry behavior.
 
 ## Documentation-Validated Constraints
 
@@ -311,8 +318,8 @@ Progress notes:
 
 - Phase 1: done
 - Phase 2: done (with URL-folder HTML fallback)
-- Phase 3: pending
-- Phase 4: pending
+- Phase 3: done
+- Phase 4: done (baseline)
 - Phase 5: in progress
 
 ## Risks and Mitigations
@@ -330,14 +337,14 @@ Progress notes:
 
 ## Immediate Next Actions
 
-1. Implement `deviation content` read module (`GET /deviation/content`) returning editable literature HTML/body per UUID.
-2. Implement navigation block generator + idempotent strip/replace engine with marker tests.
-3. Add `story nav dry-run` command that:
-   - lists ordered literature UUIDs from `gallery list` pipeline
-   - computes first/prev/next/last targets
-   - prints planned top/bottom insertions without writing.
-4. Implement literature update client for `POST /deviation/literature/update/{deviationid}` with required field preservation.
-5. Add end-to-end tests for:
+1. Harden literature update payload preservation:
+   - confirm and preserve all required/behavior-sensitive fields beyond `title`/`is_mature` during write.
+2. Improve sync reporting and failure modes:
+   - explicit counts for updated/unchanged/failed
+   - clear non-zero exit behavior when any upload fails.
+3. Add end-to-end tests for:
    - rerun idempotency (replace not duplicate)
    - partial failure reporting
    - token-expiry auto-refresh retry path during read/write operations.
+4. Add a safe “upload confirmation” guard for non-dry-run execution (optional prompt/flag strategy).
+5. Move current mixed orchestration out of `cli.py` into dedicated modules (`sync.py` / `deviation.py`) for maintainability.

@@ -58,3 +58,13 @@ def test_build_parser_gallery_list_accepts_ascending() -> None:
     args = parser.parse_args(["gallery", "list", "zoec98", "--ascending"])
 
     assert args.order == "ascending"
+
+
+def test_build_parser_parses_sync_dry_run_short_flag() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["sync", "zoec98", "-n"])
+
+    assert args.command == "sync"
+    assert args.gallery == "zoec98"
+    assert args.dry_run is True
+    assert args.order == "descending"
