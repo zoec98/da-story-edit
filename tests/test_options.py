@@ -36,13 +36,12 @@ def test_build_authorize_url_contains_expected_parameters() -> None:
     assert "state=fixed-state" in url
 
 
-def test_build_parser_parses_token_info_with_refresh_first() -> None:
+def test_build_parser_parses_token_info() -> None:
     parser = build_parser()
-    args = parser.parse_args(["auth", "token-info", "--refresh-first"])
+    args = parser.parse_args(["auth", "token-info"])
 
     assert args.command == "auth"
     assert args.auth_command == "token-info"
-    assert args.refresh_first is True
 
 
 def test_build_parser_gallery_list_defaults_to_descending() -> None:

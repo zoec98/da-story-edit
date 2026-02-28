@@ -56,6 +56,10 @@ class ConfigError(RuntimeError):
     """Raised when required environment configuration is missing."""
 
 
+class AuthTokenExpiredError(ConfigError):
+    """Raised when API reports an expired or invalid access token."""
+
+
 def _render_template_entry(var: ConfigVar) -> str:
     lines = [f"# {var.description}"]
     if var.example:

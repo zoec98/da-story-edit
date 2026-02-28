@@ -68,7 +68,6 @@ Notes:
 - `--ascending` keeps the gallery order as shown on DeviantArt.
 - `--descending` reverses that order.
 - `--literature-only` filters output to literature deviations.
-- `--refresh-first` refreshes OAuth token before listing.
 
 ## Planned CLI Usage
 

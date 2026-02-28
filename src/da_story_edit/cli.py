@@ -4,12 +4,19 @@ import json
 import secrets
 import sys
 from pathlib import Path
+from typing import Callable, TypeVar
 from urllib.parse import urlencode
 
 import httpx
 
 from da_story_edit.da_api import DeviantArtApiClient, slugify_name
-from da_story_edit.config import ConfigError, load_required_config, upsert_env_values
+from da_story_edit.config import (
+    AuthTokenExpiredError,
+    ConfigError,
+    load_config,
+    load_required_config,
+    upsert_env_values,
+)
 from da_story_edit.gallery import (
     DeviationSummary,
     extract_gallery_deviation_urls,
@@ -21,6 +28,7 @@ AUTHORIZE_ENDPOINT = "https://www.deviantart.com/oauth2/authorize"
 TOKEN_ENDPOINT = "https://www.deviantart.com/oauth2/token"
 PLACEBO_ENDPOINT = "https://www.deviantart.com/api/v1/oauth2/placebo"
 USER_AGENT = "da-story-edit/0.1.0 (+https://github.com/zoec98/da-story-edit)"
+T = TypeVar("T")
 
 
 def _build_authorize_url(
@@ -116,6 +124,11 @@ def _validate_access_token(access_token: str) -> None:
         )
         response.raise_for_status()
     except httpx.HTTPError as exc:
+        if isinstance(exc, httpx.HTTPStatusError):
+            if _looks_like_invalid_token(exc.response):
+                raise AuthTokenExpiredError(
+                    "Access token is invalid or expired."
+                ) from exc
         body = ""
         if isinstance(exc, httpx.HTTPStatusError):
             snippet = exc.response.text[:300].replace("\n", " ")
@@ -146,6 +159,56 @@ def _fetch_gallery_page_urls(gallery_url: str, username: str) -> list[str]:
 
 def _normalize_url(url: str) -> str:
     return url.rstrip("/")
+
+
+def _looks_like_invalid_token(response: httpx.Response) -> bool:
+    if response.status_code in {401, 403}:
+        text = response.text.lower()
+        if "invalid_token" in text or "expired" in text:
+            return True
+        try:
+            payload = response.json()
+        except Exception:
+            return False
+        if isinstance(payload, dict):
+            err = str(payload.get("error") or "").lower()
+            desc = str(payload.get("error_description") or "").lower()
+            return "invalid_token" in err or "expired" in desc
+    return False
+
+
+def _run_with_optional_refresh(
+    env_path: Path, operation: Callable[[str], T]
+) -> tuple[T, bool]:
+    cfg = load_required_config(["DA_ACCESS_TOKEN"], env_path)
+    try:
+        return operation(cfg["DA_ACCESS_TOKEN"]), False
+    except AuthTokenExpiredError:
+        raw = load_config(env_path)
+        has_refresh_setup = all(
+            (raw.get(name) or "").strip()
+            for name in ["DA_CLIENT_ID", "DA_CLIENT_SECRET", "DA_REFRESH_TOKEN"]
+        )
+        if not has_refresh_setup:
+            raise ConfigError(
+                "Access token is invalid or expired and automatic refresh is not configured.\n"
+                "Set DA_CLIENT_ID, DA_CLIENT_SECRET, and DA_REFRESH_TOKEN in .env,\n"
+                "then run `uv run da-story-edit auth refresh`."
+            )
+
+        refresh_cfg = load_required_config(
+            ["DA_CLIENT_ID", "DA_CLIENT_SECRET", "DA_REFRESH_TOKEN"], env_path
+        )
+        access_token, _, _ = _refresh_tokens(
+            refresh_cfg, refresh_cfg["DA_REFRESH_TOKEN"], env_path
+        )
+        try:
+            return operation(access_token), True
+        except AuthTokenExpiredError as exc:
+            raise ConfigError(
+                "Automatic token refresh was attempted once but the token is still rejected.\n"
+                "Run `uv run da-story-edit auth refresh` manually and retry the command."
+            ) from exc
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -210,20 +273,10 @@ def run(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "auth" and args.auth_command == "token-info":
-        if args.refresh_first:
-            cfg = load_required_config(
-                ["DA_CLIENT_ID", "DA_CLIENT_SECRET", "DA_REFRESH_TOKEN"], env_path
-            )
-            access_token, _, scope = _refresh_tokens(
-                cfg, cfg["DA_REFRESH_TOKEN"], env_path
-            )
-            cfg["DA_ACCESS_TOKEN"] = access_token
-            if scope:
-                cfg["DA_OAUTH_SCOPE"] = scope
-        else:
-            cfg = load_required_config(["DA_ACCESS_TOKEN"], env_path)
-
-        _validate_access_token(cfg["DA_ACCESS_TOKEN"])
+        _run_with_optional_refresh(
+            env_path, lambda access_token: _validate_access_token(access_token)
+        )
+        cfg = load_config(env_path)
 
         known_scope = (cfg.get("DA_OAUTH_SCOPE") or "").strip()
         scope_tokens = {token for token in known_scope.split() if token}
@@ -247,54 +300,57 @@ def run(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "gallery" and args.gallery_command == "list":
-        if args.refresh_first:
-            cfg = load_required_config(
-                ["DA_CLIENT_ID", "DA_CLIENT_SECRET", "DA_REFRESH_TOKEN"], env_path
-            )
-            access_token, _, _ = _refresh_tokens(cfg, cfg["DA_REFRESH_TOKEN"], env_path)
-            cfg["DA_ACCESS_TOKEN"] = access_token
-        else:
-            cfg = load_required_config(["DA_ACCESS_TOKEN"], env_path)
-
         target = parse_gallery_target(args.gallery)
-        client = DeviantArtApiClient(
-            access_token=cfg["DA_ACCESS_TOKEN"], user_agent=USER_AGENT
-        )
-        deviations: list[DeviationSummary] = []
-        resolved_folder_id: str | None = None
-        if target.folder_ref:
-            if "-" in target.folder_ref:
-                resolved_folder_id = target.folder_ref
-            else:
-                folders = client.list_folders(target.username)
-                if target.folder_slug:
-                    folder_map = {
-                        slugify_name(folder.name): folder for folder in folders
-                    }
-                    match = folder_map.get(slugify_name(target.folder_slug))
-                    if match:
-                        resolved_folder_id = match.folder_id
 
-        if resolved_folder_id is not None:
-            deviations = client.list_gallery(
-                username=target.username,
-                folder_id=resolved_folder_id,
+        def _list_with_token(
+            access_token: str,
+        ) -> tuple[list[DeviationSummary], str | None]:
+            client = DeviantArtApiClient(
+                access_token=access_token, user_agent=USER_AGENT
             )
-        elif target.folder_ref and "://" in args.gallery:
-            ordered_urls = _fetch_gallery_page_urls(args.gallery, target.username)
-            all_gallery = client.list_gallery(username=target.username, folder_id=None)
-            by_url = {_normalize_url(item.url): item for item in all_gallery}
-            deviations = [
-                by_url[url]
-                for url in (_normalize_url(u) for u in ordered_urls)
-                if url in by_url
-            ]
-            if not deviations:
-                raise ConfigError(
-                    "Could not map folder URLs from gallery HTML to API UUID entries."
+            deviations: list[DeviationSummary] = []
+            resolved_folder_id: str | None = None
+            if target.folder_ref:
+                if "-" in target.folder_ref:
+                    resolved_folder_id = target.folder_ref
+                else:
+                    folders = client.list_folders(target.username)
+                    if target.folder_slug:
+                        folder_map = {
+                            slugify_name(folder.name): folder for folder in folders
+                        }
+                        match = folder_map.get(slugify_name(target.folder_slug))
+                        if match:
+                            resolved_folder_id = match.folder_id
+
+            if resolved_folder_id is not None:
+                deviations = client.list_gallery(
+                    username=target.username,
+                    folder_id=resolved_folder_id,
                 )
-        else:
-            deviations = client.list_gallery(username=target.username, folder_id=None)
+            elif target.folder_ref and "://" in args.gallery:
+                ordered_urls = _fetch_gallery_page_urls(args.gallery, target.username)
+                all_gallery = client.list_gallery(
+                    username=target.username, folder_id=None
+                )
+                by_url = {_normalize_url(item.url): item for item in all_gallery}
+                deviations = [
+                    by_url[url]
+                    for url in (_normalize_url(u) for u in ordered_urls)
+                    if url in by_url
+                ]
+                if not deviations:
+                    raise ConfigError(
+                        "Could not map folder URLs from gallery HTML to API UUID entries."
+                    )
+            else:
+                deviations = client.list_gallery(
+                    username=target.username, folder_id=None
+                )
+            return deviations, resolved_folder_id
+
+        result, _ = _run_with_optional_refresh(env_path, _list_with_token)
+        deviations, resolved_folder_id = result
 
         if args.order == "descending":
             deviations = list(reversed(deviations))

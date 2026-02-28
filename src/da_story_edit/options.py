@@ -45,14 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional refresh token override (defaults to DA_REFRESH_TOKEN).",
     )
 
-    token_info = auth_subparsers.add_parser(
+    auth_subparsers.add_parser(
         "token-info",
         help="Validate current access token and show known scope information.",
-    )
-    token_info.add_argument(
-        "--refresh-first",
-        action="store_true",
-        help="Refresh access token before validating it.",
     )
 
     gallery = subparsers.add_parser("gallery", help="Gallery operations.")
@@ -70,11 +65,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--literature-only",
         action="store_true",
         help="Show only literature deviations.",
-    )
-    gallery_list.add_argument(
-        "--refresh-first",
-        action="store_true",
-        help="Refresh access token before listing.",
     )
     order_group = gallery_list.add_mutually_exclusive_group()
     order_group.add_argument(

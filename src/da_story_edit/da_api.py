@@ -8,7 +8,7 @@ from typing import cast
 
 import httpx
 
-from da_story_edit.config import ConfigError
+from da_story_edit.config import AuthTokenExpiredError, ConfigError
 from da_story_edit.gallery import DeviationSummary, parse_gallery_results
 
 API_BASE = "https://www.deviantart.com/api/v1/oauth2"
@@ -43,6 +43,11 @@ class DeviantArtApiClient:
             response.raise_for_status()
         except httpx.HTTPError as exc:
             body = ""
+            if isinstance(exc, httpx.HTTPStatusError):
+                if _looks_like_invalid_token(exc.response):
+                    raise AuthTokenExpiredError(
+                        "Access token is invalid or expired."
+                    ) from exc
             if isinstance(exc, httpx.HTTPStatusError):
                 snippet = exc.response.text[:300].replace("\n", " ")
                 body = f" Response body: {snippet}"
@@ -113,3 +118,19 @@ class DeviantArtApiClient:
                 continue
             folders.append(GalleryFolder(folder_id=folder_id, name=name))
         return folders
+
+
+def _looks_like_invalid_token(response: httpx.Response) -> bool:
+    if response.status_code in {401, 403}:
+        text = response.text.lower()
+        if "invalid_token" in text or "expired" in text:
+            return True
+        try:
+            payload = response.json()
+        except Exception:
+            return False
+        if isinstance(payload, dict):
+            err = str(payload.get("error") or "").lower()
+            desc = str(payload.get("error_description") or "").lower()
+            return "invalid_token" in err or "expired" in desc
+    return False
