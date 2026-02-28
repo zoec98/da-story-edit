@@ -43,6 +43,12 @@ CONFIG_REGISTRY: tuple[ConfigVar, ...] = (
         required=False,
         example="replace-me",
     ),
+    ConfigVar(
+        name="DA_OAUTH_SCOPE",
+        description="Last known OAuth scope string returned by token endpoint.",
+        required=False,
+        example="browse user.manage",
+    ),
 )
 
 

@@ -79,6 +79,12 @@ Keep a structured representation for literature entries, e.g.:
 - sequence index
 - navigation targets (`first`, `prev`, `next`, `last`)
 
+### DeviantArt ID semantics (critical)
+
+- For DeviantArt API calls, always use API `deviationid` UUID values.
+- Do not use numeric IDs from public web URL suffixes for API requests.
+- If starting from URLs/HTML, resolve each entry to API UUID before any API operation.
+
 ### Error handling
 
 - Continue processing other deviations when one edit fails.

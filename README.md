@@ -52,7 +52,23 @@ OAuth helper commands:
 uv run da-story-edit auth login-url
 uv run da-story-edit auth exchange --code "<authorization-code>"
 uv run da-story-edit auth refresh
+uv run da-story-edit auth token-info
 ```
+
+Gallery listing command:
+
+```bash
+uv run da-story-edit gallery list "https://www.deviantart.com/<user>/gallery/<folderid>/<slug>" --descending
+uv run da-story-edit gallery list "https://www.deviantart.com/<user>/gallery/<folderid>/<slug>" --ascending
+```
+
+Notes:
+
+- `--descending` is the default.
+- `--ascending` keeps the gallery order as shown on DeviantArt.
+- `--descending` reverses that order.
+- `--literature-only` filters output to literature deviations.
+- `--refresh-first` refreshes OAuth token before listing.
 
 ## Planned CLI Usage
 

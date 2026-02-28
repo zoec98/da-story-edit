@@ -34,3 +34,28 @@ def test_build_authorize_url_contains_expected_parameters() -> None:
     assert "redirect_uri=http%3A%2F%2Flocalhost%3A8765%2Fcallback" in url
     assert "scope=browse+user.manage" in url
     assert "state=fixed-state" in url
+
+
+def test_build_parser_parses_token_info_with_refresh_first() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["auth", "token-info", "--refresh-first"])
+
+    assert args.command == "auth"
+    assert args.auth_command == "token-info"
+    assert args.refresh_first is True
+
+
+def test_build_parser_gallery_list_defaults_to_descending() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["gallery", "list", "zoec98"])
+
+    assert args.command == "gallery"
+    assert args.gallery_command == "list"
+    assert args.order == "descending"
+
+
+def test_build_parser_gallery_list_accepts_ascending() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["gallery", "list", "zoec98", "--ascending"])
+
+    assert args.order == "ascending"
