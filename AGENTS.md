@@ -23,6 +23,7 @@ Build a Python application that:
 
 - Language: Python
 - Package/runtime manager: `uv`
+- Configuration/secrets: `python-dotenv` with local `.env` (never committed)
 - Tests: `pytest`
 - Type checking: `ty` (Astral, via `ty check`)
 - Linting: `ruff check --fix`
@@ -43,6 +44,15 @@ Run project tooling with `uv run ...` only.
   - `ruff ...`
 
 If a command needs project context, execute it from the repository root.
+
+## Configuration Contract
+
+- Use `.env` for local config and secrets.
+- On startup, bootstrap `.env` from a central config registry:
+  - create `.env` if missing
+  - append only missing keys with instruction comments
+  - never overwrite existing key/value pairs
+- If required values remain empty, terminate with clear user instructions.
 
 ## Implementation Guidance
 

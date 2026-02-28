@@ -29,6 +29,23 @@ This repository is in early setup phase. Core implementation is planned around t
 uv sync
 ```
 
+## Configuration
+
+Configuration is loaded from `.env` using `python-dotenv`.
+
+On startup, the app will:
+
+1. Create `.env` if it does not exist.
+2. Append any missing registry keys with instruction comments.
+3. Preserve existing keys/values already in `.env`.
+4. Exit with instructions if required values are still empty.
+
+Current required keys:
+
+- `DA_CLIENT_ID`
+- `DA_CLIENT_SECRET`
+- `DA_REDIRECT_URI`
+
 ## Planned CLI Usage
 
 The package exposes a console entry point named `da-story-edit`.

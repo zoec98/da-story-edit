@@ -27,6 +27,23 @@ Implication:
 - Numeric IDs parsed from web URLs are useful as a temporary HTML fallback only, not canonical identifiers for API editing.
 - Main implementation should be OAuth2 API-first.
 
+## Configuration and Secrets Plan
+
+Use `python-dotenv` and local `.env` (gitignored).
+
+Startup behavior:
+
+1. If `.env` is missing, create it.
+2. Append any missing config keys from a registry, including short instruction comments.
+3. Preserve all existing `.env` entries untouched.
+4. Validate required values; if any are empty/missing, terminate with actionable instructions.
+
+Initial required keys:
+
+- `DA_CLIENT_ID`
+- `DA_CLIENT_SECRET`
+- `DA_REDIRECT_URI`
+
 ## Current Inputs
 
 - Test gallery: `https://www.deviantart.com/zoec98/gallery/100193480/testgallery`
@@ -235,6 +252,7 @@ Test phases:
 1. Foundation
    - create modules, models, and CLI skeleton
    - implement API client with OAuth token plumbing
+   - implement `.env` bootstrap + validation (registry-driven)
 2. Robust parsing
    - gallery URL resolution + API listing/pagination + tests
 3. Navigation engine
