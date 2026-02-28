@@ -7,11 +7,16 @@ from da_story_edit.config import (
     ConfigError,
     bootstrap_env_file,
     load_and_validate_config,
+    upsert_env_values,
 )
 
 
 def _all_required_values() -> dict[str, str]:
-    return {var.name: f"value-for-{var.name.lower()}" for var in CONFIG_REGISTRY}
+    return {
+        var.name: f"value-for-{var.name.lower()}"
+        for var in CONFIG_REGISTRY
+        if var.required
+    }
 
 
 def _write_env(path: Path, values: dict[str, str]) -> None:
@@ -52,6 +57,8 @@ def test_load_and_validate_raises_for_missing_required_values(tmp_path: Path) ->
     message = str(excinfo.value)
     assert "Configuration is incomplete." in message
     for var in CONFIG_REGISTRY:
+        if not var.required:
+            continue
         assert var.name in message
 
 
@@ -62,4 +69,24 @@ def test_load_and_validate_returns_values_when_complete(tmp_path: Path) -> None:
 
     loaded = load_and_validate_config(env_path)
 
-    assert loaded == values
+    for key, expected in values.items():
+        assert loaded[key] == expected
+
+
+def test_upsert_env_values_updates_existing_and_appends_new(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    _write_env(env_path, {"DA_CLIENT_ID": "old", "DA_REDIRECT_URI": "uri"})
+
+    upsert_env_values(
+        env_path,
+        {
+            "DA_CLIENT_ID": "new",
+            "DA_REFRESH_TOKEN": "rtok",
+        },
+    )
+
+    content = env_path.read_text(encoding="utf-8")
+    assert "DA_CLIENT_ID=new" in content
+    assert "DA_CLIENT_ID=old" not in content
+    assert "DA_REDIRECT_URI=uri" in content
+    assert "DA_REFRESH_TOKEN=rtok" in content

@@ -46,6 +46,14 @@ Current required keys:
 - `DA_CLIENT_SECRET`
 - `DA_REDIRECT_URI`
 
+OAuth helper commands:
+
+```bash
+uv run da-story-edit auth login-url
+uv run da-story-edit auth exchange --code "<authorization-code>"
+uv run da-story-edit auth refresh
+```
+
 ## Planned CLI Usage
 
 The package exposes a console entry point named `da-story-edit`.
