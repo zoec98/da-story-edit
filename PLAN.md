@@ -10,19 +10,17 @@ The update flow must be idempotent:
 2. Recompute sequence from current gallery contents.
 3. Insert updated navigation blocks.
 
-## Status Update (2026-02-28)
+## Status Update (2026-03-06)
 
-Yes, we are still following the plan, with one practical adjustment:
-
-- We are API-first, but use an HTML fallback for URL-folder ordering when DeviantArt folder metadata does not expose the web folder ID/slug mapping.
+The current codebase is beyond initial scaffolding. The source of truth is the implemented CLI and tests, not the earlier API assumptions in this document.
 
 Current position in the plan:
 
 - Delivery Phase 1 (`Foundation`): completed.
 - Delivery Phase 2 (`Robust parsing`): completed for gallery listing and ordering behavior.
-- Delivery Phase 3 (`Navigation engine`): completed (marker-based local rewrite + tests).
-- Delivery Phase 4 (`Edit client`): implemented baseline (`deviation` read, content fetch, literature update call).
-- Delivery Phase 5 (`Hardening`): partially completed for auth/token behavior and error messaging.
+- Delivery Phase 3 (`Navigation engine`): completed.
+- Delivery Phase 4 (`Edit client`): implemented at baseline.
+- Delivery Phase 5 (`Hardening`): in progress.
 
 What is implemented now:
 
@@ -41,43 +39,53 @@ What is implemented now:
   - `--ascending` keeps DA gallery order
   - `--descending` reverses order (default)
   - `--literature-only`
+- Gallery workflow CLI:
+  - `gallery download <gallery_url|username>`
+  - `gallery link <workdir>`
+  - `gallery upload <workdir>`
 - UUID-safe behavior:
   - API operations use UUID `deviationid`
   - URL numeric suffixes are never used for API calls
 - Folder URL handling:
-  - try API folder resolution first
-  - fallback to gallery HTML ordering + map URLs to API `/gallery/all` UUID entries
-- Sync pipeline:
-  - `sync <gallery> -n` creates an empty workdir, downloads deviations, applies local nav edits, and writes diffs
-  - `sync <gallery>` uploads changed deviations
-  - per-item artifacts are written (`*_meta.json`, `*_original.html`, `*_updated.html`, `*.diff`)
+  - try API folder resolution by folder slug first
+  - then try the folder reference from the URL directly
+  - otherwise fall back to `/gallery/all`
+- Working-directory pipeline:
+  - `gallery download` creates an empty gallery workdir, writes `manifest.json`, `*_meta.json`, and `*_original.html`
+  - `gallery link` reads the manifest and originals, writes `*_updated.html` and `*.diff`
+  - `gallery upload` reads the manifest and linked files, then uploads changed deviations
+  - default workdirs live under `galleries/<slugified-gallery-name>`
 - Deviation/edit API integration:
-  - `GET /deviation/{uuid}` for metadata
-  - `GET /deviation/content` for body HTML
+  - `GET /deviation/{uuid}?expand=deviation.fulltext` for metadata and fulltext blocks
   - `POST /deviation/literature/update/{uuid}` for writeback
+- Failure handling now includes per-item `fetch_error`, `empty_content`, and missing-local-artifact reporting.
 
 What is not implemented yet:
 
-- Full write payload preservation hardening (currently baseline fields only: `title`, `is_mature`, `text`).
-- Richer failure classification/reporting for batch sync (skip vs retry vs fatal summary codes).
+- Full write payload preservation hardening beyond `title`, `is_mature`, and rewritten `text`.
+- A verified high-fidelity literature round-trip format for read-modify-write operations.
+- Non-zero exit behavior when download/link/upload has per-item failures.
 - Contract/integration tests that mock upload payload shape and retry behavior.
+- Refactoring the sync orchestration out of `cli.py`.
 
 ## Documentation-Validated Constraints
 
 This plan is aligned to DeviantArt Developer API `v1/20240701`.
 
-Confirmed from docs:
+Original plan assumptions:
 
 - Gallery listing should use API endpoints (`/gallery/all` or `/gallery/{folderid}`), not HTML scraping as primary.
 - Deviation identity in API is UUID `deviationid` (string UUID), not the numeric slug tail in web URLs.
-- Full literature/journal HTML is available via `GET /deviation/content` (scope: `browse`).
 - Literature updates are supported via `POST /deviation/literature/update/{deviationid}` (scope: `user.manage`).
 - API clients must send a User-Agent and use HTTP compression.
 
-Implication:
+Current code reality:
 
 - Numeric IDs parsed from web URLs are useful as a temporary HTML fallback only, not canonical identifiers for API editing.
 - Main implementation should be OAuth2 API-first.
+- The current implementation does not call `GET /deviation/content`.
+- Instead, it reads `text_content.body.markup.blocks` from `GET /deviation/{uuid}?expand=deviation.fulltext` and reconstructs simple HTML paragraphs locally before navigation insertion.
+- This reconstruction path is the main open correctness question for the project.
 
 ## Configuration and Secrets Plan
 
@@ -203,42 +211,37 @@ Safety rule: if markers are malformed (start without end), fail that deviation e
 
 ### Gallery parsing
 
-Primary strategy:
+Implemented strategy:
 
 - Parse API response objects from `/gallery/all` or `/gallery/{folderid}`.
-- Preserve API response order (including pagination order).
+- Preserve API response order across pagination.
 - Keep only entries where API type indicates literature.
 - Use returned `deviationid` UUID directly.
 
-Fallback strategy:
-
-- Parse cached/public HTML only when API access is unavailable (development fallback).
-- Mark fallback mode as read-only until UUID resolution is available.
-
 ### Deviation ID resolution
 
-Primary:
+Implemented:
 
 - Use API-provided `deviationid` UUID from gallery response.
-
-Fallback:
-
-- If starting from URL list, resolve IDs through API metadata/deviation lookup before any write attempt.
+- Do not use numeric ID suffixes from public web URLs for API reads or writes.
 
 ## Editing Strategy
 
-Confirmed: official update endpoint exists for literature updates.
+Current implementation:
 
-Plan:
-
-1. Start with dry-run mode:
-   - compute and print intended changes only.
-2. Implement real update mode after auth flow is verified.
-3. Add strict checks:
-   - only edit entries confirmed as literature in API response.
-   - skip with warning if content is non-editable.
-4. Preserve required fields on update:
-   - title, is_mature, and any required maturity metadata must be sent to avoid unintended clearing.
+1. `sync` supports dry-run and live upload modes.
+2. Only literature entries from gallery listing are processed.
+3. For each literature deviation:
+   - fetch metadata with `expand=deviation.fulltext`
+   - reconstruct HTML from text blocks
+   - strip existing managed nav blocks
+   - insert fresh top and bottom nav blocks
+   - write local artifacts and diffs
+   - upload changed items in live mode
+4. Current upload preserves only baseline fields:
+   - `title`
+   - `is_mature`
+   - rewritten `text`
 
 ## CLI Plan
 
@@ -310,7 +313,7 @@ Test phases:
 3. Navigation engine
    - block rendering and idempotent replacement logic
 4. Edit client
-   - `/deviation/content` read + `/deviation/literature/update/{uuid}` write + retries
+   - `GET /deviation/{uuid}?expand=deviation.fulltext` read + `/deviation/literature/update/{uuid}` write
 5. Hardening
    - logging, error reporting, edge cases, docs refresh
 
@@ -334,17 +337,23 @@ Progress notes:
   - unique marker strings and strict replacement logic.
 - Parameter clearing risk on update endpoint:
   - always fetch/preserve required existing fields before posting updates.
+- Content fidelity risk:
+  - current fulltext-block-to-HTML reconstruction may lose formatting or semantics needed for safe round-trip uploads.
 
 ## Immediate Next Actions
 
-1. Harden literature update payload preservation:
-   - confirm and preserve all required/behavior-sensitive fields beyond `title`/`is_mature` during write.
-2. Improve sync reporting and failure modes:
-   - explicit counts for updated/unchanged/failed
-   - clear non-zero exit behavior when any upload fails.
-3. Add end-to-end tests for:
-   - rerun idempotency (replace not duplicate)
+1. Validate the literature body round-trip:
+   - confirm whether `deviation.fulltext` block reconstruction is sufficient for upload
+   - otherwise restore or replace with a safer content-read path
+2. Harden literature update payload preservation:
+   - confirm and preserve all required or behavior-sensitive fields beyond `title` and `is_mature`
+3. Improve download/link/upload reporting and failure modes:
+   - keep explicit changed/failed/uploaded counts
+   - return non-zero when a command has failures
+4. Add end-to-end and contract tests for:
+   - download then link then upload workflow
+   - rerun idempotency
    - partial failure reporting
-   - token-expiry auto-refresh retry path during read/write operations.
-4. Add a safe “upload confirmation” guard for non-dry-run execution (optional prompt/flag strategy).
-5. Move current mixed orchestration out of `cli.py` into dedicated modules (`sync.py` / `deviation.py`) for maintainability.
+   - token-expiry auto-refresh during upload
+   - upload payload shape
+5. Move current mixed orchestration out of `cli.py` into dedicated modules (`sync.py` / `deviation.py`) for maintainability

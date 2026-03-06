@@ -10,7 +10,7 @@ wheels/
 .venv
 
 # Local caches and temporary artifacts
-tmp/
+galleries/
 
 # Local secrets
 .env

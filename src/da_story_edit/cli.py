@@ -5,8 +5,11 @@ import secrets
 import sys
 from datetime import UTC, datetime
 from difflib import unified_diff
+from html import escape
 from pathlib import Path
-from typing import Callable, TypeVar
+import re
+from typing import Callable, TypeVar, cast
+import unicodedata
 from urllib.parse import urlencode
 
 import httpx
@@ -146,7 +149,7 @@ def _resolve_gallery_deviations(
     access_token: str,
     gallery_input: str,
     http_client: ThrottledHttpClient,
-) -> tuple[GalleryTarget, list[DeviationSummary], str | None]:
+) -> tuple[GalleryTarget, list[DeviationSummary], str | None, str]:
     target = parse_gallery_target(gallery_input)
     client = DeviantArtApiClient(
         access_token=access_token,
@@ -156,8 +159,9 @@ def _resolve_gallery_deviations(
 
     deviations: list[DeviationSummary] = []
     resolved_folder_id: str | None = None
+    workspace_label = target.username
+    folders = client.list_folders(target.username) if target.folder_slug else []
     if target.folder_slug:
-        folders = client.list_folders(target.username)
         folder_map = {slugify_name(folder.name): folder for folder in folders}
         match = folder_map.get(slugify_name(target.folder_slug))
         if match:
@@ -169,8 +173,12 @@ def _resolve_gallery_deviations(
             if candidate:
                 deviations = candidate
                 resolved_folder_id = match.folder_id
+                workspace_label = match.name
 
     if not deviations and target.folder_ref:
+        if not folders:
+            folders = client.list_folders(target.username)
+        folder_by_id = {folder.folder_id: folder for folder in folders}
         candidate = client.list_gallery(
             username=target.username,
             folder_id=target.folder_ref,
@@ -179,6 +187,11 @@ def _resolve_gallery_deviations(
         if candidate:
             deviations = candidate
             resolved_folder_id = target.folder_ref
+            matched_folder = folder_by_id.get(target.folder_ref)
+            if matched_folder:
+                workspace_label = matched_folder.name
+            elif target.folder_slug:
+                workspace_label = target.folder_slug
 
     if not deviations:
         deviations = client.list_gallery(
@@ -188,7 +201,7 @@ def _resolve_gallery_deviations(
         )
         resolved_folder_id = None
 
-    return target, deviations, resolved_folder_id
+    return target, deviations, resolved_folder_id, workspace_label
 
 
 def _ensure_empty_workdir(path: Path) -> Path:
@@ -200,6 +213,19 @@ def _ensure_empty_workdir(path: Path) -> Path:
     else:
         path.mkdir(parents=True, exist_ok=False)
     return path
+
+
+def _slugify_path_name(value: str) -> str:
+    normalized = (
+        unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
+    )
+    lowered = normalized.lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")
+    return slug or "gallery"
+
+
+def _default_gallery_workdir(label: str) -> Path:
+    return Path("galleries") / _slugify_path_name(label)
 
 
 def _looks_like_invalid_token(response: httpx.Response) -> bool:
@@ -216,6 +242,77 @@ def _looks_like_invalid_token(response: httpx.Response) -> bool:
             desc = str(payload.get("error_description") or "").lower()
             return "invalid_token" in err or "expired" in desc
     return False
+
+
+def _html_from_fulltext_markup(payload: dict[str, object]) -> str:
+    text_content = payload.get("text_content")
+    if not isinstance(text_content, dict):
+        return ""
+    text_content_dict = cast(dict[str, object], text_content)
+    body = text_content_dict.get("body")
+    if not isinstance(body, dict):
+        return ""
+    body_dict = cast(dict[str, object], body)
+    markup = body_dict.get("markup")
+    if not isinstance(markup, dict):
+        return ""
+    markup_dict = cast(dict[str, object], markup)
+    blocks = markup_dict.get("blocks")
+    if not isinstance(blocks, list):
+        return ""
+
+    lines: list[str] = []
+    for raw_block in blocks:
+        if not isinstance(raw_block, dict):
+            continue
+        block = cast(dict[str, object], raw_block)
+        text = str(block.get("text") or "")
+        if not text.strip():
+            continue
+        escaped = escape(text).replace("\n", "<br>")
+        lines.append(f"<p>{escaped}</p>")
+    return "\n".join(lines)
+
+
+def _manifest_path(workdir: Path) -> Path:
+    return workdir / "manifest.json"
+
+
+def _read_manifest(workdir: Path) -> dict[str, object]:
+    manifest_path = _manifest_path(workdir)
+    if not manifest_path.exists():
+        raise ConfigError(f"Manifest not found: {manifest_path}")
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"Manifest is not valid JSON: {manifest_path}") from exc
+    if not isinstance(payload, dict):
+        raise ConfigError(f"Manifest has unexpected shape: {manifest_path}")
+    return payload
+
+
+def _write_manifest(workdir: Path, manifest: dict[str, object]) -> None:
+    _manifest_path(workdir).write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _manifest_items(manifest: dict[str, object]) -> list[dict[str, object]]:
+    raw_items = manifest.get("items")
+    if not isinstance(raw_items, list):
+        raise ConfigError("Manifest is missing an 'items' list.")
+    items: list[dict[str, object]] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            raise ConfigError("Manifest item has unexpected shape.")
+        items.append(cast(dict[str, object], raw_item))
+    return items
+
+
+def _item_base_name(idx: int, deviation_id: str) -> str:
+    safe_id = deviation_id.replace("/", "_")
+    return f"{idx:03d}_{safe_id}"
 
 
 def _run_with_optional_refresh(
@@ -398,7 +495,7 @@ def run(argv: list[str] | None = None) -> int:
             ),
             http_client,
         )
-        target, deviations, resolved_folder_id = result
+        target, deviations, resolved_folder_id, _ = result
 
         if args.order == "descending":
             deviations = list(reversed(deviations))
@@ -422,7 +519,7 @@ def run(argv: list[str] | None = None) -> int:
         print(f"Literature entries: {literature_count}")
         return 0
 
-    if args.command == "sync":
+    if args.command == "gallery" and args.gallery_command == "download":
         result, refreshed = _run_with_optional_refresh(
             env_path,
             lambda access_token: _resolve_gallery_deviations(
@@ -430,7 +527,7 @@ def run(argv: list[str] | None = None) -> int:
             ),
             http_client,
         )
-        target, deviations, _ = result
+        target, deviations, resolved_folder_id, workspace_label = result
         if args.order == "descending":
             deviations = list(reversed(deviations))
         literature = [item for item in deviations if item.is_literature]
@@ -442,8 +539,7 @@ def run(argv: list[str] | None = None) -> int:
         if args.workdir:
             workdir = _ensure_empty_workdir(Path(args.workdir))
         else:
-            ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-            workdir = _ensure_empty_workdir(Path("tmp") / f"sync-{ts}")
+            workdir = _ensure_empty_workdir(_default_gallery_workdir(workspace_label))
 
         cfg = load_config(env_path)
         access_token = cfg.get("DA_ACCESS_TOKEN") or ""
@@ -457,76 +553,222 @@ def run(argv: list[str] | None = None) -> int:
             http_client=http_client,
         )
 
-        changed_count = 0
-        uploaded_count = 0
-        print(f"Sync workdir: {workdir}")
+        failed_count = 0
+        downloaded_count = 0
+        print(f"Gallery workdir: {workdir}")
         print(f"Gallery: {target.username}")
+        if resolved_folder_id:
+            print(f"Folder: {resolved_folder_id}")
         print(f"Order: {args.order}")
         print(f"Literature items: {len(literature)}")
-        if args.dry_run:
-            print("Mode: dry-run")
-        else:
-            print("Mode: live upload")
+        print("Mode: download")
+
+        manifest_items: list[dict[str, object]] = []
 
         for idx, item in enumerate(literature, start=1):
-            first = literature[0].url
-            last = literature[-1].url
-            prev_url = literature[idx - 2].url if idx > 1 else None
-            next_url = literature[idx].url if idx < len(literature) else None
-            targets = NavTargets(first=first, prev=prev_url, next=next_url, last=last)
+            try:
+                metadata = client.get_deviation(
+                    item.deviation_id, expand="deviation.fulltext"
+                )
+            except ConfigError as exc:
+                failed_count += 1
+                print(
+                    f"{idx:03d} {item.title} [{item.deviation_id}] failed=fetch_error details={exc}"
+                )
+                continue
 
-            metadata = client.get_deviation(item.deviation_id)
-            html = client.get_deviation_content_html(item.deviation_id)
-            updated = apply_navigation(html, targets)
-            changed = updated != (html if html.endswith("\n") else f"{html}\n")
+            html = _html_from_fulltext_markup(metadata)
+            if not html.strip():
+                failed_count += 1
+                print(
+                    f"{idx:03d} {item.title} [{item.deviation_id}] failed=empty_content "
+                    "details=no body markup in /deviation/{uuid}?expand=deviation.fulltext"
+                )
+                continue
 
-            safe_id = item.deviation_id.replace("/", "_")
-            base = f"{idx:03d}_{safe_id}"
+            base = _item_base_name(idx, item.deviation_id)
             (workdir / f"{base}_meta.json").write_text(
                 json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8"
             )
             (workdir / f"{base}_original.html").write_text(html, encoding="utf-8")
-            (workdir / f"{base}_updated.html").write_text(updated, encoding="utf-8")
-
-            print(
-                f"{idx:03d} {item.title} [{item.deviation_id}] changed={'yes' if changed else 'no'}"
+            manifest_items.append(
+                {
+                    "index": idx,
+                    "deviation_id": item.deviation_id,
+                    "title": item.title,
+                    "url": item.url,
+                    "kind": item.kind,
+                    "base_name": base,
+                }
             )
+            downloaded_count += 1
+            print(
+                f"{idx:03d} {item.title} [{item.deviation_id}] downloaded=yes"
+            )
+
+        manifest = {
+            "schema_version": 1,
+            "downloaded_at": datetime.now(UTC).isoformat(),
+            "gallery_input": args.gallery,
+            "gallery_username": target.username,
+            "resolved_folder_id": resolved_folder_id,
+            "workspace_label": workspace_label,
+            "order": args.order,
+            "items": manifest_items,
+        }
+        _write_manifest(workdir, manifest)
+
+        print(f"Downloaded items: {downloaded_count}")
+        print(f"Failed items: {failed_count}")
+        print(f"Manifest: {_manifest_path(workdir)}")
+        return 0
+
+    if args.command == "gallery" and args.gallery_command == "link":
+        workdir = Path(args.workdir)
+        manifest = _read_manifest(workdir)
+        items = _manifest_items(manifest)
+        if not items:
+            raise ConfigError("Manifest contains no items to link.")
+
+        changed_count = 0
+        failed_count = 0
+        print(f"Gallery workdir: {workdir}")
+        print("Mode: link")
+        print(f"Literature items: {len(items)}")
+
+        urls = [str(item.get("url") or "").strip() for item in items]
+        if any(not url for url in urls):
+            raise ConfigError("Manifest contains an item with a missing URL.")
+
+        for idx, item in enumerate(items, start=1):
+            deviation_id = str(item.get("deviation_id") or "").strip()
+            title = str(item.get("title") or "").strip() or deviation_id
+            base = str(item.get("base_name") or "").strip()
+            if not deviation_id or not base:
+                raise ConfigError("Manifest contains an item with missing identifiers.")
+
+            original_path = workdir / f"{base}_original.html"
+            if not original_path.exists():
+                failed_count += 1
+                print(f"{idx:03d} {title} [{deviation_id}] failed=missing_original")
+                continue
+
+            html = original_path.read_text(encoding="utf-8")
+            targets = NavTargets(
+                first=urls[0],
+                prev=urls[idx - 2] if idx > 1 else None,
+                next=urls[idx] if idx < len(urls) else None,
+                last=urls[-1],
+            )
+            updated = apply_navigation(html, targets)
+            changed = updated != (html if html.endswith("\n") else f"{html}\n")
+
+            (workdir / f"{base}_updated.html").write_text(updated, encoding="utf-8")
+            diff = "\n".join(
+                unified_diff(
+                    (html or "").splitlines(),
+                    updated.splitlines(),
+                    fromfile=f"{base}_original.html",
+                    tofile=f"{base}_updated.html",
+                    lineterm="",
+                )
+            )
+            (workdir / f"{base}.diff").write_text(
+                diff + ("\n" if diff else ""), encoding="utf-8"
+            )
+
+            print(f"{idx:03d} {title} [{deviation_id}] changed={'yes' if changed else 'no'}")
             if changed:
                 changed_count += 1
-                diff = "\n".join(
-                    unified_diff(
-                        (html or "").splitlines(),
-                        updated.splitlines(),
-                        fromfile=f"{base}_original.html",
-                        tofile=f"{base}_updated.html",
-                        lineterm="",
-                    )
-                )
-                (workdir / f"{base}.diff").write_text(
-                    diff + ("\n" if diff else ""), encoding="utf-8"
-                )
-                if args.dry_run:
-                    diff_lines = diff.splitlines()
-                    preview = "\n".join(diff_lines[:60])
-                    if preview:
-                        print(preview)
 
-                if not args.dry_run:
-                    title = str(metadata.get("title") or item.title)
-                    is_mature = bool(metadata.get("is_mature"))
-                    client.update_literature(
-                        deviation_id=item.deviation_id,
-                        title=title,
-                        body_html=updated,
-                        is_mature=is_mature,
-                    )
-                    uploaded_count += 1
-
+        manifest["linked_at"] = datetime.now(UTC).isoformat()
+        _write_manifest(workdir, manifest)
         print(f"Changed items: {changed_count}")
-        if args.dry_run:
-            print("No upload performed (dry-run).")
-        else:
-            print(f"Uploaded items: {uploaded_count}")
+        print(f"Failed items: {failed_count}")
+        return 0
+
+    if args.command == "gallery" and args.gallery_command == "upload":
+        workdir = Path(args.workdir)
+        manifest = _read_manifest(workdir)
+        items = _manifest_items(manifest)
+        if not items:
+            raise ConfigError("Manifest contains no items to upload.")
+
+        def _upload_operation(access_token: str) -> tuple[int, int]:
+            client = DeviantArtApiClient(
+                access_token=access_token,
+                user_agent=USER_AGENT,
+                http_client=http_client,
+            )
+            uploaded_count = 0
+            failed_count = 0
+
+            print(f"Gallery workdir: {workdir}")
+            print("Mode: upload")
+            print(f"Literature items: {len(items)}")
+
+            for idx, item in enumerate(items, start=1):
+                deviation_id = str(item.get("deviation_id") or "").strip()
+                title = str(item.get("title") or "").strip() or deviation_id
+                base = str(item.get("base_name") or "").strip()
+                if not deviation_id or not base:
+                    raise ConfigError(
+                        "Manifest contains an item with missing identifiers."
+                    )
+
+                meta_path = workdir / f"{base}_meta.json"
+                original_path = workdir / f"{base}_original.html"
+                updated_path = workdir / f"{base}_updated.html"
+                if not meta_path.exists():
+                    failed_count += 1
+                    print(f"{idx:03d} {title} [{deviation_id}] failed=missing_meta")
+                    continue
+                if not original_path.exists():
+                    failed_count += 1
+                    print(f"{idx:03d} {title} [{deviation_id}] failed=missing_original")
+                    continue
+                if not updated_path.exists():
+                    failed_count += 1
+                    print(f"{idx:03d} {title} [{deviation_id}] failed=missing_updated")
+                    continue
+
+                try:
+                    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError as exc:
+                    raise ConfigError(f"Metadata is not valid JSON: {meta_path}") from exc
+                if not isinstance(metadata, dict):
+                    raise ConfigError(f"Metadata has unexpected shape: {meta_path}")
+
+                original_html = original_path.read_text(encoding="utf-8")
+                updated_html = updated_path.read_text(encoding="utf-8")
+                changed = updated_html != (
+                    original_html
+                    if original_html.endswith("\n")
+                    else f"{original_html}\n"
+                )
+                print(f"{idx:03d} {title} [{deviation_id}] changed={'yes' if changed else 'no'}")
+                if not changed:
+                    continue
+
+                client.update_literature(
+                    deviation_id=deviation_id,
+                    title=str(metadata.get("title") or title),
+                    body_html=updated_html,
+                    is_mature=bool(metadata.get("is_mature")),
+                )
+                uploaded_count += 1
+
+            return uploaded_count, failed_count
+
+        (uploaded_count, failed_count), _ = _run_with_optional_refresh(
+            env_path,
+            _upload_operation,
+            http_client,
+        )
+        manifest["uploaded_at"] = datetime.now(UTC).isoformat()
+        _write_manifest(workdir, manifest)
+        print(f"Uploaded items: {uploaded_count}")
+        print(f"Failed items: {failed_count}")
         return 0
 
     parser.print_help()

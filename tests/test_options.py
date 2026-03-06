@@ -1,4 +1,6 @@
-from da_story_edit.cli import _build_authorize_url
+from pathlib import Path
+
+from da_story_edit.cli import _build_authorize_url, _default_gallery_workdir
 from da_story_edit.options import build_parser
 
 
@@ -60,11 +62,35 @@ def test_build_parser_gallery_list_accepts_ascending() -> None:
     assert args.order == "ascending"
 
 
-def test_build_parser_parses_sync_dry_run_short_flag() -> None:
+def test_build_parser_gallery_download_defaults_to_descending() -> None:
     parser = build_parser()
-    args = parser.parse_args(["sync", "zoec98", "-n"])
+    args = parser.parse_args(["gallery", "download", "zoec98"])
 
-    assert args.command == "sync"
+    assert args.command == "gallery"
+    assert args.gallery_command == "download"
     assert args.gallery == "zoec98"
-    assert args.dry_run is True
     assert args.order == "descending"
+
+
+def test_build_parser_parses_gallery_link_workdir() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["gallery", "link", "galleries/horse-stories"])
+
+    assert args.command == "gallery"
+    assert args.gallery_command == "link"
+    assert args.workdir == "galleries/horse-stories"
+
+
+def test_build_parser_parses_gallery_upload_workdir() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["gallery", "upload", "galleries/horse-stories"])
+
+    assert args.command == "gallery"
+    assert args.gallery_command == "upload"
+    assert args.workdir == "galleries/horse-stories"
+
+
+def test_default_gallery_workdir_slugifies_label() -> None:
+    assert _default_gallery_workdir("Horse Stories") == Path(
+        "galleries/horse-stories"
+    )

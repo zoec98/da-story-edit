@@ -171,17 +171,13 @@ class DeviantArtApiClient:
 
         return folders
 
-    def get_deviation(self, deviation_id: str) -> dict[str, object]:
-        return self._get(f"/deviation/{deviation_id}", {"mature_content": "true"})
-
-    def get_deviation_content_html(self, deviation_id: str) -> str:
-        payload = self._get(
-            "/deviation/content",
-            {
-                "deviationid": deviation_id,
-            },
-        )
-        return str(payload.get("html") or "")
+    def get_deviation(
+        self, deviation_id: str, *, expand: str | None = None
+    ) -> dict[str, object]:
+        params: dict[str, object] = {"mature_content": "true"}
+        if expand:
+            params["expand"] = expand
+        return self._get(f"/deviation/{deviation_id}", params)
 
     def update_literature(
         self, deviation_id: str, title: str, body_html: str, is_mature: bool

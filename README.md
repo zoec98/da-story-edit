@@ -16,7 +16,24 @@ Given a gallery URL, the tool will:
 
 ## Project Status
 
-This repository is in early setup phase. Core implementation is planned around the behavior above.
+This repository is in active implementation.
+
+Implemented today:
+
+- OAuth helper commands for login URL generation, code exchange, token refresh, and token validation.
+- `.env` bootstrap and required-key validation.
+- Gallery commands via DeviantArt API with folder resolution, ordering controls, and literature-only filtering.
+- Split gallery workflow:
+  - `gallery download` fetches literature deviations and stores local artifacts,
+  - `gallery link` rewrites managed navigation blocks locally,
+  - `gallery upload` uploads locally linked deviations.
+
+Still in progress:
+
+- hardening the literature read/write contract,
+- preserving all write-sensitive fields on update,
+- improving failure classification and sync summary behavior,
+- broader integration-style tests for download/link/upload behavior.
 
 ## Requirements
 
@@ -55,11 +72,14 @@ uv run da-story-edit auth refresh
 uv run da-story-edit auth token-info
 ```
 
-Gallery listing command:
+Gallery commands:
 
 ```bash
 uv run da-story-edit gallery list "https://www.deviantart.com/<user>/gallery/<folderid>/<slug>" --descending
 uv run da-story-edit gallery list "https://www.deviantart.com/<user>/gallery/<folderid>/<slug>" --ascending
+uv run da-story-edit gallery download "https://www.deviantart.com/<user>/gallery/<folderid>/<slug>"
+uv run da-story-edit gallery link galleries/<gallery-name>
+uv run da-story-edit gallery upload galleries/<gallery-name>
 ```
 
 Notes:
@@ -67,37 +87,53 @@ Notes:
 - `--descending` is the default.
 - `--ascending` keeps the gallery order as shown on DeviantArt.
 - `--descending` reverses that order.
-- `--literature-only` filters output to literature deviations.
+- `--literature-only` filters `gallery list` output to literature deviations.
+- `gallery download` defaults to `galleries/<gallery-name>` where the name is slugified for filesystem use.
 
-Sync command (download, local edit, optional upload):
+Working directory layout:
 
 ```bash
-uv run da-story-edit sync "https://www.deviantart.com/<user>/gallery/<folderid>/<slug>" -n
-uv run da-story-edit sync "https://www.deviantart.com/<user>/gallery/<folderid>/<slug>"
+galleries/
+  horse-stories/
+    manifest.json
+    001_<uuid>_meta.json
+    001_<uuid>_original.html
+    001_<uuid>_updated.html
+    001_<uuid>.diff
+    ...
 ```
 
 Notes:
 
-- `-n` / `--dry-run` writes local artifacts and diffs only, with no upload.
-- Without `-n`, changed literature deviations are uploaded via the literature update endpoint.
-- Use `--workdir <path>` to control where local artifacts are written; otherwise a timestamped `tmp/sync-*` directory is created.
+- `gallery download` reads deviation metadata with `expand=deviation.fulltext`, reconstructs simple HTML from text blocks, and stores per-item metadata and original HTML.
+- `gallery link` reads downloaded artifacts, applies navigation locally, and writes `*_updated.html` and `*.diff`.
+- `gallery upload` uploads changed `*_updated.html` files via the literature update endpoint.
+- Use `--workdir <path>` with `gallery download` to override the default `galleries/<gallery-name>` path.
+- Current upload payload preservation is baseline only: `title`, `is_mature`, and rewritten `text`.
 
-## Planned CLI Usage
+## CLI Usage
 
 The package exposes a console entry point named `da-story-edit`.
 
-Example target behavior:
+Currently available commands:
 
 ```bash
-uv run da-story-edit "https://www.deviantart.com/<user>/gallery/<id>/<name>"
+uv run da-story-edit auth login-url
+uv run da-story-edit auth exchange --code "<authorization-code>"
+uv run da-story-edit auth refresh
+uv run da-story-edit auth token-info
+uv run da-story-edit gallery list "https://www.deviantart.com/<user>/gallery/<id>/<name>"
+uv run da-story-edit gallery download "https://www.deviantart.com/<user>/gallery/<id>/<name>"
+uv run da-story-edit gallery link galleries/<gallery-name>
+uv run da-story-edit gallery upload galleries/<gallery-name>
 ```
 
-Expected high-level output:
+Current high-level workflow output:
 
 - Gallery summary (total deviations found)
 - Literature deviations selected for editing
-- Per-deviation edit result (updated/skipped/failed)
-- Final summary
+- Per-deviation download/link/upload result with `changed=yes|no` or `failed=...`
+- Final summary counts for downloaded, changed, failed, or uploaded items depending on the command
 
 ## Idempotency Contract
 
